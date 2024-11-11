@@ -1,0 +1,239 @@
+---
+title: "ProbabilityAssessment"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# load packages
+```{r}
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(readxl)
+library(tidyr)
+```
+
+# Assessment 1: Statistical hypothesis testing
+# Question: do the levels at inclusion vary between males and females?
+
+## prepare the table
+```{r}
+# read the table biomarkers and covariates tables from local
+biomarker <- read_excel("biomarkers.xlsx")
+covariates <- read_excel("covariates.xlsx")
+
+# filter the biomarker table with time point = 0weeks
+biomarker <- biomarker %>%
+  separate(Biomarker, into = c("PatientID", "TimePoint"), sep = "-", remove = T) %>% 
+  filter(TimePoint=="0weeks")
+
+Sex <- covariates[,c(1,3)]
+
+# check if the patients in two tables match each other
+missing_patient <- setdiff(Sex$PatientID, biomarker$PatientID)
+print(missing_patient)
+
+# remove patient with ID 40 which missing biomarker information
+Sex <- Sex[!(Sex$PatientID %in% missing_patient), ]
+
+# add age to the biomarker table
+merged_data <- merge(biomarker, Sex, by = "PatientID")
+names(merged_data)[names(merged_data) == 'Sex (1=male, 2=female)'] <- 'Sex'
+merged_data$Sex <- recode(merged_data$Sex,
+                          `1` = "male",
+                          `2` = "female")
+
+merged_data$Sex <- factor(merged_data$Sex, levels = c("male", "female"))
+biomarkersName <- c("IL-8","VEGF-A","OPG","TGF-beta-1","IL-6","CXCL9","CXCL1","IL-18","CSF-1")
+
+```
+
+## Assess Normality
+```{r}
+# write a function for testing normality
+check_normality <- function(data, biomarkersName) {
+  male_data <- data %>% filter(Sex == "male") %>% pull(biomarkersName)
+  female_data <- data %>% filter(Sex == "female") %>% pull(biomarkersName)
+  male_shapiro <- shapiro.test(male_data)
+  female_shapiro <- shapiro.test(female_data)
+  return(data.frame(
+    Biomarker = biomarkersName,
+    Male_p = male_shapiro$p.value,
+    Female_p = female_shapiro$p.value
+  ))
+}
+
+# apply the function to all biomarkers
+normality_results <- lapply(biomarkersName, function(b) check_normality(merged_data, b))
+normality_resultTable <- do.call(rbind, normality_results)
+print(normality_resultTable)
+
+# Add columns indicating normality to the table based on p-values
+normality_resultTable <- normality_resultTable %>%
+  mutate(
+    Male_normal = Male_p > 0.05,
+    Female_normal = Female_p > 0.05
+  )
+
+# write.csv(normality_resultTable,file = "normality_result.csv", row.names = T)  
+```
+
+## perform the t.test or Wilcoxon test
+```{r}
+# write a function for the hypothesis test
+perform_test <- function(data, biomarker, normality_info) {
+  male_data <- data %>% filter(Sex == "male") %>% pull(biomarker)
+  female_data <- data %>% filter(Sex == "female") %>% pull(biomarker)
+  
+  # Retrieve normality results for the biomarker
+  normality_row <- normality_info %>% filter(Biomarker == biomarker)
+  
+  male_normal <- normality_row$Male_normal
+  female_normal <- normality_row$Female_normal
+  
+  # Decide on the test based on normality
+  if (male_normal & female_normal) {
+    # Check equality of variances
+    var_test <- var.test(male_data, female_data)
+    var_equal <- var_test$p.value > 0.05
+    # Perform t-test
+    t_result <- t.test(male_data, female_data, var.equal = var_equal)
+    test_used <- ifelse(var_equal, "t-test (equal variances)", "Welch's t-test (unequal variances)")
+    p_value <- t_result$p.value
+  } else {
+    # Perform Wilcoxon rank-sum Test
+    w_result <- wilcox.test(male_data, female_data)
+    test_used <- "Wilcoxon"
+    p_value <- w_result$p.value
+  }
+  # Return the results
+  return(data.frame(
+    Biomarker = biomarker,
+    Test = test_used,
+    p_value = p_value
+  ))
+}
+
+# Step 3: Apply the function to all biomarkers
+
+test_results_list <- lapply(biomarkersName, function(b) {
+  perform_test(merged_data, b, normality_resultTable)
+})
+
+test_results_table <- do.call(rbind, test_results_list)
+test_results_table
+
+# write.csv(test_results_table,file = "test_result1.csv", row.names = T)
+```
+
+## Type 1 error rate with Multiple Testing
+```{r}
+# total number of biomarkers
+n <- 9
+# Significance level for each individual test
+alpha <- 0.05
+# the probability of not making a Type I error in a single test
+p_NoError_single <- 1 - alpha
+print(p_NoError_single)
+# probability of making at least one Type I error
+p_atLeastOneError <- 1 - p_NoError_single^n
+print(p_atLeastOneError)
+```
+
+## Adjust for multiple testing by Bonferroni Correlation
+```{r}
+test_results_tableAdj <- test_results_table
+test_results_tableAdj$Bonferroni_p <- p.adjust(test_results_tableAdj$p_value, method = "bonferroni")
+test_results_tableAdj$Significant_Bonferroni <- test_results_tableAdj$Bonferroni_p < 0.05
+test_results_tableAdj
+
+write.csv(test_results_tableAdj,file = "test_resultAdj.csv", row.names = T)
+
+```
+
+# Assessment 2: Regression modelling
+## read the table biomarkers and covariates tables from local
+```{r}
+biomarker <- read_excel("biomarkers.xlsx")
+covariates <- read_excel("covariates.xlsx")
+
+# filter the biomarker table with time point = 0weeks
+biomarker <- biomarker %>%
+  separate(Biomarker, into = c("PatientID", "TimePoint"), sep = "-", remove = T) %>% 
+  filter(TimePoint=="0weeks")
+
+# check if the patients in two tables match each other
+missing_patient <- setdiff(covariates$PatientID, biomarker$PatientID)
+print(missing_patient)
+
+# remove patient with ID 40 which missing biomarker information
+covariates <- covariates[!(covariates$PatientID %in% missing_patient), ]
+```
+
+## merge two tables, and then modify and filter the combined_data
+```{r}
+combined_data <- merge(covariates, biomarker, by = "PatientID")
+# rename the rownames
+colnames(combined_data) <- gsub("-", "_", colnames(combined_data))
+colnames(combined_data)[colnames(combined_data) == "Sex (1=male, 2=female)"] <- "Sex"
+colnames(combined_data)[colnames(combined_data) == "Smoker (1=yes, 2=no)"] <- "Smoker"
+# remove the rows with Vas_12months == NA
+combined_data <- combined_data %>%
+  filter(!is.na(Vas_12months))
+head(combined_data)
+```
+
+## randomly subset 80% patients from the combined_data for building the regression model, the rest for verification
+```{r}
+set.seed(222) 
+shuffled_data <- combined_data[sample(nrow(combined_data)), ]
+train_size <- floor(0.8 * nrow(shuffled_data))
+lm_data <- shuffled_data[1:train_size, ]
+test_data <- shuffled_data[(train_size + 1):nrow(shuffled_data), ]
+# Check the sizes of two tables
+cat("Number for lm:", nrow(lm_data), "\n")
+cat("Number for test:", nrow(test_data), "\n")
+```
+
+## Fit the regression model
+```{r}
+model <- lm(Vas_12months ~ IL_8 + VEGF_A + OPG + TGF_beta_1 + IL_6 + CXCL9 + CXCL1 +IL_18 + CSF_1 + Age + Sex + Smoker, data = lm_data)
+summary(model)
+# save the table
+model_summary <- summary(model)
+coefficients <- model_summary$coefficients
+coef_table <- as.data.frame(coefficients)
+colnames(coef_table) <- c("Coefficient Estimate", "Standard Error", "t-value", "p-value")
+# View the table
+print(coef_table)
+write.csv(coef_table,file = "Task2coef_table.csv", row.names = T)
+```
+
+## calculate the residuals, mean squared rrror and R-squared of the model
+```{r}
+lm_predictions <- predict(model, newdata = lm_data)
+lm_residuals <- lm_data$Vas_12months - lm_predictions
+# Mean Squared Error and R-squared 
+mean(lm_residuals^2)  
+summary(model)$r.squared  
+
+```
+
+## Predictions on the test_data
+```{r}
+test_predictions <- predict(model, newdata = test_data)
+# predicted vs actual 12-month VAS in the test set
+comparison <- data.frame(Actual = test_data$Vas_12months, Predicted = test_predictions)
+print(comparison)
+write.csv(comparison,file = "Task2comparison.csv", row.names = T)
+# Plot actual vs predicted values
+p1 <- ggplot(comparison, aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "blue") +
+  ggtitle("Actual vs. Predicted 12-month VAS on test data")
+p1
+# Mean Squared Error and R-squard
+mean((test_data$Vas_12months - test_predictions)^2)
+cor(test_data$Vas_12months, test_predictions)^2  
+
+```
+
